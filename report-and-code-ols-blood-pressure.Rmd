@@ -1,0 +1,481 @@
+---
+title: "Analyzing Effect of Weight on Blood Pressure"
+author: "Sonia Song, Kenneth Hahn, Mei Qu"
+subtitle: "Lab 2: Datasci 203" 
+output:
+  pdf_document:
+    toc: yes
+    fig_caption: yes
+  bookdown::pdf_document2:
+    number_sections: yes
+    toc: yes
+    output:
+---
+
+\newpage
+\setcounter{page}{1}
+
+```{r Load packages and set options, include=FALSE}
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(tidyr)
+library(knitr)
+library(lmtest)
+library(stargazer)
+library(gridExtra)
+library(sandwich)
+library(patchwork)
+options(tinytex.verbose = TRUE)
+knitr::opts_chunk$set(echo=FALSE, message=FALSE)
+```
+
+```{r Load data, include=FALSE}
+raw_exam_data <- read.csv("~/Downloads/examination.csv")
+raw_question_data <- read.csv("~/Downloads/questionnaire.csv")
+```
+
+# Importance and Context
+Hypertension, affecting nearly one-third of adults worldwide, is a leading risk factor for heart disease and stroke. Despite its prevalence, the exact causes of hypertension are not fully understood, and various factors are thought to contribute to its development. One such factor that warrants investigation is body weight. Our analysis seeks to answer the below research question using statistical methods:
+
+\begin{quote}
+  \textit{What are the differences in blood pressure levels among individuals with varying body weights?}
+\end{quote}
+
+The answers to this question could provide crucial insights, potentially leading to more effective public health strategies, personalized interventions to manage and prevent hypertension, and overall enhancement of health outcomes and reduction of health disparities related to hypertension.
+
+We will also analyze the effect of smoking/secondary smoke as an additional factor. With the information of how many members of the household smoke, we would like to determine if any exposure to smoking can potentially influence the distribution of blood pressure.
+
+# Data and Methodology
+We sourced data from the National Health and Nutrition Examination Survey, a survey that combines both interview data along with physical examinations to characterize the prevalence of major diseases. From the survey, we will utilize 2 datasets: the physical examination and the questionnaire datasets from 2013-2014.^[Centers for Disease Control and Prevention. (2014b). 2013-2014 questionnaire data - continuous NHANES. National Health and Nutrition Examination Survey. https://wwwn.cdc.gov/Nchs/Nhanes/Search/DataPage.aspx?Component=Questionnaire&Cycle=2013-2014] These will be inner joined on `SEQN` - a unique identifier for each respondent. We will take the blood pressure and body weight from the physical examination and household smoking data from the questionnaire to conduct our regression analysis. 
+
+To determine the blood pressure of the respondents, we will use the variables `BPXDI1`-`BPXDI4` and `BPXSY1`-`BPXSY4` (`BPXDI` = diastolic blood pressure; `BPXSY` = systolic blood pressure, and the appended number is the number of tests conducted on the respondent, in units of mmHg). First, we will remove any zero or NA values as a reading of zero blood pressure is not possible. Then, because there must only be one target variable to represent the blood pressure in our model, we will take the average of the respective pressures for each of the four tests to smooth out any outliers. Finally, we will calculate a “Mean Arterial Pressure” (or `MAP`, a clinical measure to gauge hypertensive and hypotensive states), as follows (`DP` = Diastolic Pressure; `SP` = Systolic Pressure)^[DeMers, D., \& Wachs, D. (2023). Physiology, Mean Arterial Pressure. StatPearls. https://www.ncbi.nlm.nih.gov/books/NBK538226/#:~:text=A%20common%20method%20used%20to,%2B%201%2F3(PP)]:
+$MAP = DP + \frac{1}{3}(SP - DP)$
+
+```{r Get Relevant Columns, include=FALSE}
+exam_data <- raw_exam_data[,c('SEQN','BPXDI1','BPXDI2','BPXDI3','BPXDI4',"BPXSY1","BPXSY2","BPXSY3","BPXSY4","BMXWT")]
+question_data <- raw_question_data[,c('SEQN',"SMD460")]
+```
+
+```{r join data and split into train and test data, include = FALSE}
+joined_data = exam_data %>%
+  inner_join(question_data, by = 'SEQN')
+
+n <- nrow(joined_data)
+set.seed(203)
+train_index <- sample(seq_len(n),size=0.30*n)
+train_data <- joined_data[train_index,]
+test_data <- joined_data[-train_index,]
+
+summary(train_data)
+```
+
+```{r Filter blood pressure data and calculate MAP for train_data, include = FALSE}
+
+filtered_train_data <- train_data %>%
+  mutate(
+    BPXDI1 = na_if(BPXDI1, 0),
+    BPXDI2 = na_if(BPXDI2, 0),
+    BPXDI3 = na_if(BPXDI3, 0),
+    BPXDI4 = na_if(BPXDI4, 0),
+    BPXSY1 = na_if(BPXSY1, 0),
+    BPXSY2 = na_if(BPXSY2, 0),
+    BPXSY3 = na_if(BPXSY3, 0),
+    BPXSY4 = na_if(BPXSY4, 0)
+  )
+
+filtered_train_data <- filtered_train_data %>%
+  mutate(
+    avg_diastolic = rowMeans(select(.,BPXDI1:BPXDI4),na.rm=TRUE),
+    avg_systolic = rowMeans(select(.,BPXSY1:BPXSY4),na.rm=TRUE)
+  )
+
+filtered_train_data <- filtered_train_data %>%
+  filter(
+    !is.na(avg_diastolic) & !is.na(avg_systolic)
+  )
+
+filtered_train_data <- filtered_train_data %>%
+  mutate(
+    map = avg_diastolic + (1/3) * (avg_systolic - avg_diastolic)
+  )
+
+summary(filtered_train_data)
+
+```
+
+As for our features, we will represent the body weight with the BMXWT variable, and remove any weights that are NA. To estimate the relationship between smokers and blood pressure for our secondary model, we will utilize the questionnaire dataset that asks the question “How many people [in your household] smoke cigarettes […] or any other tobacco product?” in the variable `SMD460`. We categorized any values $>0$ as a smoking household and any $=0$ as a non-smoking household. We also removed values $>777$ as those responses are not valid. We chose this question as opposed to other smoking related questions because this not only informs of the impact of an individual’s smoking habits on blood pressure, but it may also imply the influence of secondhand smoking.
+
+```{r remove NA values from body weight and categorizes smokers from train_data, include = FALSE}
+
+filtered_train_data <- filtered_train_data %>%
+  filter(!is.na(BMXWT))
+
+filtered_train_data <- filtered_train_data %>%
+  filter(!is.na(SMD460) & SMD460 < 777)
+
+kg_to_lbs <- 2.20462
+filtered_train_data$weight <- filtered_train_data$BMXWT * kg_to_lbs
+
+filtered_train_data$Smoker <- ifelse(filtered_train_data$SMD460 > 0, 'Smoking Household', 'Non-Smoking Household')
+
+summary(filtered_train_data)
+
+```
+
+```{r Filter blood pressure data and calculate MAP for test_data, include = FALSE}
+
+summary(test_data)
+
+count_rows_test_original <- nrow(test_data)
+
+filtered_test_data <- test_data %>%
+  mutate(
+    BPXDI1 = na_if(BPXDI1, 0),
+    BPXDI2 = na_if(BPXDI2, 0),
+    BPXDI3 = na_if(BPXDI3, 0),
+    BPXDI4 = na_if(BPXDI4, 0),
+    BPXSY1 = na_if(BPXSY1, 0),
+    BPXSY2 = na_if(BPXSY2, 0),
+    BPXSY3 = na_if(BPXSY3, 0),
+    BPXSY4 = na_if(BPXSY4, 0)
+  )
+
+filtered_test_data <- filtered_test_data %>%
+  mutate(
+    avg_diastolic = rowMeans(select(.,BPXDI1:BPXDI4),na.rm=TRUE),
+    avg_systolic = rowMeans(select(.,BPXSY1:BPXSY4),na.rm=TRUE)
+  )
+
+filtered_test_data <- filtered_test_data %>%
+  filter(
+    !is.na(avg_diastolic) & !is.na(avg_systolic)
+  )
+
+count_rows_test_remove_na <- nrow(filtered_test_data)
+
+filtered_test_data <- filtered_test_data %>%
+  mutate(
+    map = avg_diastolic + (1/3) * (avg_systolic - avg_diastolic)
+  )
+
+summary(filtered_test_data)
+
+```
+
+```{r remove NA values from body weight and categorizes smokers from test_data, include = FALSE}
+
+filtered_test_data <- filtered_test_data %>%
+  filter(!is.na(BMXWT))
+
+filtered_test_data <- filtered_test_data %>%
+  filter(!is.na(SMD460) & SMD460 < 777)
+
+count_rows_test_remove_weightna <- nrow(filtered_test_data)
+
+filtered_test_data$weight <- filtered_test_data$BMXWT * kg_to_lbs
+
+filtered_test_data$Smoker <- ifelse(filtered_test_data$SMD460 > 0, 'Smoking Household', 'Non-Smoking Household')
+
+summary(filtered_test_data)
+
+```
+
+After filtering out NA values and unrealistic outliers, we ended up with a joined data set of `r nrow(filtered_train_data) + nrow(filtered_test_data)` rows, originally beginning from `r nrow(joined_data)` rows. Due to the size of this dataset we randomly sampled the data into training and test data sets, with `r nrow(filtered_train_data)` and `r nrow(filtered_test_data)` rows respectively. With the test dataset, we will perform OLS regression and evaluate the best fitting model from the following:
+
+$\text{(1. Simple Model)} \hspace{1mm} MAP = \beta_0 + \beta_1weight$
+
+$\text{(2. Indicator Variable)} \hspace{1mm} MAP = \beta_0 + \beta_1weight + \beta_2smoking\_household$
+
+In order to conduct the OLS regression we satisfy the two large-scale assumptions in that the data must be 1) I.I.D. and 2) a unique BLP must exist. Evaluating the first assumption, we can state that the data is independent as each row represents a different respondent and their `MAP` and `weight` will not influence another respondent’s `MAP` or body weight. There is a possibility that the smoking household may not be independent if some of the participants were living in the same household; however, we will assume that it is independent through the sampling method and large quantity of data. We can assume that the data is also identically distributed as it is pulling from the underlying distribution of the U.S. population for all points.
+
+To ensure a BLP exists, the covariance of the features and the outcome must be finite. By reviewing the histograms of `MAP` and body weight in Figure 1 we do not observe any heavy tails, which suggests that the covariance is in fact finite. Also, to categorize whether the BLP is unique we must ensure that there is no collinearity between variables. For our first model, we are only estimating the impact of `weight` on `MAP`, so no collinearity exists. For our second model, reviewing the scatterplot of `weight` and MAP in Figure 2, we can see that there does not appear to be collinearity between `weight` and household smoking, which aligns with our understanding that one’s weight should not influence whether the household smokes.
+
+```{r plot MAP and weight variables for train_data, fig.cap='Distributions for MAP (left) and Body Weight (right)', fig.width = 8, fig.height= 2}
+p1 <- ggplot(data = filtered_train_data) +
+  aes(x = map) +
+  geom_histogram() +
+  labs(x = 'Mean Arterial Pressure (mmHg)',y = 'Count')
+
+p2 <- ggplot(data = filtered_train_data) +
+  aes(x = log(map)) +
+  geom_histogram() +
+  labs(x = 'Log of Mean Arterial Pressure (M.A.P.)',y = 'Count')
+
+p3 <- ggplot(data=filtered_train_data) +
+  aes(x = weight) +
+  geom_histogram() +
+  labs(x = 'Body Weight (lbs)',y = 'Count')
+
+p4 <- ggplot(data = filtered_train_data) +
+  aes(x = log(weight)) +
+  geom_histogram() +
+  labs(x = 'Log of Body Weight', y = 'Count')
+
+grid.arrange(p1,p3, nrow = 1, ncol = 2)
+
+```
+
+With the large scale assumptions satisfied, we will conduct OLS regression. We will evaluate the models by reviewing the t-test results for the coefficients and we will conduct an F-test to determine if the addition of the smoking household variable adds any significant contribution to MAP. The F-test will be performed in order to evaluate the following null hypothesis and alternative hypothesis:
+\begin{quote}
+  \textbf{$H_0$:} \textit{The variable \texttt{smoking\_household} does not contribute to the MAP model}
+\end{quote}
+
+\begin{quote}
+  \textbf{$H_a$:} \textit{The variable \texttt{smoking\_household} does contribute to the MAP model}
+\end{quote}
+
+
+```{r plot variables for train_data, include=FALSE}
+p5 <- ggplot(data = filtered_train_data) +
+  aes(x = SMD460) +
+  geom_histogram() +
+  labs(x = 'Number of Smokers in Household',y = 'Count')
+
+p6 <- ggplot(data = filtered_train_data) +
+  aes(x = weight, y = map, color = Smoker) +
+  geom_point() +
+  scale_color_manual(values = c('Smoking Household' = 'yellow', 'Non-Smoking Household' = 'blue')) +
+  labs(x = 'Body Weight (lbs)', y = 'M.A.P. (mmHg)')
+
+p7 <- ggplot(data = filtered_train_data) +
+  aes(x = log(weight), y = map, color = Smoker) +
+  geom_point() +
+  scale_color_manual(values = c('Smoking Household' = 'yellow', 'Non-Smoking Household' = 'blue')) +
+  labs(x = 'Log of Body Weight (lbs)', y = 'M.A.P. (mmHg)')
+
+p5
+p6
+p7
+
+```
+
+```{r do OLS regression on train_data, include=FALSE}
+train_model_short <- lm(map ~ weight, data = filtered_train_data)
+train_model <- lm(map ~ 1 + weight + Smoker, data = filtered_train_data)
+
+par(mfrow = c(2, 2))
+plot(train_model_short)
+plot(train_model)
+
+anova(train_model,train_model_short,test="F")
+
+adj_r_squared_short <- summary(train_model_short)$adj.r.squared
+adj_r_squared_log <- summary(train_model)$adj.r.squared
+
+adj_summary_table <- data.frame(
+  Model = c("Linear Model", "Indicator Variable Model"),
+  Adjusted_R_Squared = c(adj_r_squared_short, adj_r_squared_log)
+)
+
+adj_summary_table
+
+```
+
+```{r plot MAP and weight variables for test_data, include=FALSE}
+p7 <- ggplot(data=filtered_test_data) +
+  aes(x = map) +
+  geom_histogram() +
+  labs(x = 'Mean Arterial Pressure (M.A.P.)',y = 'Count')
+
+p8 <- ggplot(data=filtered_test_data) +
+  aes(x = log(map)) +
+  geom_histogram() +
+  labs(x = 'Log of Mean Arterial Pressure (M.A.P.)',y = 'Count')
+
+p9 <- ggplot(data=filtered_test_data) +
+  aes(x = weight) +
+  geom_histogram() +
+  labs(x = 'Body Weight (lbs)',y = 'Count')
+
+p10 <- ggplot(data=filtered_test_data) +
+  aes(x = log(weight)) +
+  geom_histogram() +
+  labs(x = 'Log of Body Weight (lbs)',y = 'Count')
+
+grid.arrange(p7, p8, p9, p10, nrow = 2, ncol = 2)
+
+```
+
+
+```{r plot variables for test_data, include=FALSE}
+p11 <- ggplot(data = filtered_test_data) +
+  aes(x = SMD460) +
+  geom_histogram() +
+  labs(x = 'Number of Smokers in Household',y = 'Count')
+
+p12 <- ggplot(data = filtered_test_data) +
+  aes(x = weight, y = map, color = Smoker) +
+  geom_point() +
+  scale_color_manual(values = c('Smoking Household' = 'yellow', 'Non-Smoking Household' = 'blue')) +
+  labs(x = 'Body Weight (lbs)', y = 'M.A.P. (mmHg)')
+
+p13 <- ggplot(data = filtered_test_data) +
+  aes(x = log(weight), y = map, color = Smoker) +
+  geom_point() +
+  scale_color_manual(values = c('Smoking Household' = 'yellow', 'Non-Smoking Household' = 'blue')) +
+  labs(x = 'Log of Body Weight (lbs)', y = 'M.A.P. (mmHg)')
+
+p11
+p12
+p13
+
+```
+
+
+```{r do OLS regression on test_data, include=FALSE}
+test_model_short <- lm(map ~ 1 + weight, data = filtered_test_data)
+test_model <- lm(map ~ 1 + weight + Smoker, data = filtered_test_data)
+
+par(mfrow = c(2, 2))
+plot(test_model_short)
+plot(test_model)
+
+summary(test_model_short)
+summary(test_model)
+
+f_test_results <- anova(train_model,train_model_short,test="F")
+
+adj_r_squared_short <- summary(test_model_short)$adj.r.squared
+adj_r_squared_log <- summary(test_model)$adj.r.squared
+
+adj_summary_table <- data.frame(
+  Model = c("Linear Model", "Indicator Variable Model"),
+  Adjusted_R_Squared = c(adj_r_squared_short, adj_r_squared_log)
+)
+
+adj_summary_table
+
+```
+
+# Results
+
+The results of the OLS regression are shown in Table 1. We calculated the robust standard error with the `vcovHC()` method using type `HC3` for both models, assuming that the dataset was heteroscedastic based on the Figure 2 below. The linear regressions for both models suggest that the coefficient for `weight` ($\beta_1 =$ `r round(test_model$coefficients[2],3)`) is statistically significant with p-values effectively equal to zero (<2.2e-16) when conducting a `coeftest()`. The t-test suggests that there is a relationship between `MAP` and `weight` and the coefficient delineates that a 1 lb increase in weight leads to a proportional increase of `r round(test_model$coefficients[2],3)` mmHg in MAP for our distribution.
+
+```{r stargazer table, results = 'asis', include = FALSE}
+sterror <- sqrt(diag(vcovHC(test_model, type = "HC3")))
+sterror_short <- sqrt(diag(vcovHC(test_model_short, type = "HC3")))
+se_list <- list(sterror_short,sterror)
+
+stargazer(test_model_short, test_model, type = "latex",
+          se = se_list,
+          title = "Comparison of Regression for Mean Arterial Pressure and Weight",
+          column.labels = c("Model 1","Model 2 (Smoking Household)"),
+          dep.var.labels = "Mean Arterial Pressure (M.A.P.)",
+          covariate.labels = c("Weight (lbs)", "Smoking Household", "Intercept"),
+          star.cutoffs = c(0.05, 0.01, 0.001),
+          column.sep.width = "0pt"
+)
+```
+
+\begin{table}[!htbp] 
+\centering 
+\caption{Comparison of Regression for Mean Arterial Pressure and Weight} 
+\label{table:regression_comparison} 
+
+\begin{tabular}{@{\extracolsep{5pt}}lcc} 
+\hline 
+\hline 
+ & \multicolumn{2}{c}{\textit{Dependent variable:}} \\ 
+\cline{2-3} 
+ & \multicolumn{2}{c}{Mean Arterial Pressure (M.A.P.)} \\ 
+ & Model 1 & Model 2 (Smoking Household) \\ 
+\hline 
+ Weight (lbs) & 0.095$^{***}$ (0.003) & 0.095$^{***}$ (0.003) \\ 
+ Smoking Household &  & 0.378 (0.381) \\ 
+ Intercept & 68.108$^{***}$ (0.534) & 68.016$^{***}$ (0.540) \\ 
+\hline 
+Observations & 5,135 & 5,135 \\ 
+R$^{2}$ & 0.167 & 0.168 \\ 
+Adjusted R$^{2}$ & 0.167 & 0.167 \\ 
+Residual Std. Error & 11.550 (df = 5133) & 11.550 (df = 5132) \\ 
+F Statistic & 1,031.582$^{***}$ (df = 1; 5133) & 516.310$^{***}$ (df = 2; 5132) \\ 
+\hline 
+\textit{Note:} & \multicolumn{2}{r}{$^{*}$p$<$0.05; $^{**}$p$<$0.01; $^{***}$p$<$0.001} \\ 
+\hline 
+\hline 
+\end{tabular} 
+\end{table} 
+
+```{r calculate coefftest values,include = FALSE}
+coeff_long <- coeftest(test_model,vcov = vcovHC(test_model, type = "HC3"))
+coeff_short <- coeftest(test_model_short)
+print(coeff_long)
+print(coeff_short)
+```
+
+To evaluate the effect of the `smoking_household` indicator variable, we conducted an ‘F-test’ between our models, where we set the Type I error to be $\alpha = 0.05$.  The results of the test indicates that there is no statistically significant difference between the two models (F = `r round(f_test_results[2,5],3)`, p = `r round(f_test_results[2,6],3)`) in terms of their ability to describe the blood pressure distribution. Specifically, the addition of the indicator variable to the model does not provide an improvement in fit over the simpler model.
+
+```{r Fitted Line on Data Plot, fig.cap='Weight vs. Blood Pressure', fig.width=8, fig.height=2}
+ggplot(data = filtered_test_data) +
+  aes(x = weight, y = map, color = Smoker) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  scale_color_manual(values = c('Smoking Household' = 'yellow', 'Non-Smoking Household' = 'blue')) +
+  labs(x = 'Body Weight (lbs)', y = 'M.A.P. (mmHg)')
+
+```
+
+We have considered other transformations such as linear-log or log-log models but ultimately decided to use the indicator-variable model on the test dataset to capture additional factors that can influence blood pressure that would be interesting to analyze, see Appendix for various model assumptions. Ultimately, after evaluating the two models, we have decided to proceed with the simple model as our final model. This decision is based on the lack of significant improvement from incorporating the household smoking variable and on the interpretability of weights implication on `MAP`.
+
+# Discussion
+For our indicator variable model, we only considered data on the number of people in the household who smoke, resulting in a statistically insignificant improvement over the simple model. Despite multiple studies concluding that smoking is indeed a high-risk factor for hypertension, the broadness of our variable may have limited its effectiveness. Instead of assessing household smoking, a targeted approach that examines the frequency and intensity of just the respondent’s smoking behavior could provide more precise insights. Additionally, other transformations are worth considering, one of which is taking the log of body weight. The absolute weight change could have different degrees of influence on a person’s health depending on the scale of the original weight. Therefore, taking the log (comparing the percentage of weight change rather than absolute) would stabilize the variable and make the residuals more homoscedastic. 
+
+Finally, the questionnaire was conducted in 2013-2014 (10 years ago). We chose this dataset and specific variables given completeness of the data relative to surveys conducted in more recent years. Although updates have been made since then, the time elapsed could potentially lead to data staleness which may not describe the current U.S. population. In conclusion, this study demonstrates a positive relationship between weight and blood pressure. These findings underscore the importance of maintaining a healthy weight as a means of managing blood pressure, hypertension, and promoting overall cardiovascular health.
+
+\newpage
+# Appendix
+
+I. Link to our data sources (in CSV format):
+
+https://github.com/hahnkenneth/lab_2_hahn_qu_song/tree/main/data/raw/archive%20(5)
+
+II. Model Specifications we tried to arrive at the final model: 
+
+When choosing datasets, we learned that values collected from real-world observations rather than synthetic dataset require more data manipulations but could be more valuable in understanding relationships between variables that inform human behaviors. 
+
+Log-Log Model ($log(MAP) = \beta_0 + \beta_1log(weight) + \epsilon$):
+Looking at the Residuals-vs-Fitted-values Plot from transforming our simple linear model to a Log-Log model, we saw that the residuals for the Log-Log model are more evenly distributed around zero, indicating less heteroscedasticity and suggesting a better model fit. However, there are clear limitations as well. The model assumes a constant elasticity, which might not hold true across all weight ranges. Additionally, taking the log of blood pressure may not make practical sense as the marginal increase in blood pressure is relatively consistent across the distribution. We could also face overfitting the data if linear regression is already a good fit for the data.
+
+Learning: Explainability needs to be considered in a real-world context to determine suitability of a particular transformation. 
+
+Linear-Log Model ($MAP = \beta_0 + \beta_1log(weight) + \epsilon$):
+
+Learnings: When choosing the independent variable, we learned that it is important to form hypotheses drawn from previous knowledge (e.g. weight may have a linear relationship with blood pressure) when selecting from a large number of factors. 
+
+Before arriving at the models used in testing, we tried the following specifications: 
+
+1. $MAP = \beta_0 + \beta_1log(weight) + \epsilon$
+
+2. $log(MAP) = \beta_0 + \beta_1log(weight) + \epsilon$
+
+3. $MAP = \beta_0 + \beta_1log(weight) + \beta_2smokinghousehold + \epsilon$
+
+We did not end up testing 1) as it is too similar from the simple model and we believe that indicator variables should be prioritized given the high probability of unobserved variables influencing predictability of the model. However, if we are not limited by the number of models (2) for testing, it would be worth conducting further research to understand the applicability of this transformation. We ruled out 2) because taking the log of blood pressure does not provide meaningful transformation as mentioned above. Finally, we ruled out 3) because the complexity (combining log and indicator variable) will reduce the interpretability of the final output. 
+
+Learnings: Adding variables doesn’t necessarily increase the predictive power of the model, even if one may intuitively think that the variable could be correlated with the dependent variable (e.g. household smoke with blood pressure). 
+
+III. Residuals-vs-fitted values plot for the simple model (left) and indicator variable model (right):
+
+```{r,fig.height = 2, fig.width = 8}
+# Create a data frame with fitted values and residuals
+residuals_df <- data.frame(Fitted = fitted(test_model_short), Residuals = residuals(test_model_short))
+residuals_df_long <- data.frame(Fitted = fitted(test_model), Residuals = residuals(test_model))
+
+# Create the plot using ggplot2
+a1 <- ggplot(residuals_df, aes(x = Fitted, y = Residuals)) +
+  geom_point(color = "black") +
+  geom_hline(yintercept = 0, color = "red", linetype = "dotted") +
+  labs(x = "Fitted Values", y = "Residuals", title = "Simple Model Residual v.s Fitted") +
+  theme_minimal()
+
+a2 <- ggplot(residuals_df_long, aes(x = Fitted, y = Residuals)) +
+  geom_point(color = "blue") +
+  geom_hline(yintercept = 0, color = "red", linetype = "dotted") +
+  labs(x = "Fitted Values", y = "Residuals", title = "Indicator Var. Model Residual v.s Fitted") +
+  theme_minimal()
+
+a1 | a2
+
+```
+
