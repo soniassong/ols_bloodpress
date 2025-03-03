@@ -1,7 +1,7 @@
 # Analyzing Effect of Weight on Blood Pressure 
 This repo contains code for the report: [Analyzing Effect of Weight on Blood Pressure](https://drive.google.com/file/d/1_HovWcbrhRbZbi9o4iB4M_nV3ofFlBCr/view). 
 
-All code in can be found under: report-and-code-ols-blood-pressure.Rmd \
+All code can be found under: report-and-code-ols-blood-pressure.Rmd \
 All data used in the project can be found under the src folder. 
 
 ## Overview
@@ -85,3 +85,5 @@ This study confirms a positive relationship between body weight and blood pressu
 ## References
 - Centers for Disease Control and Prevention. (2014). [2013-2014 NHANES Questionnaire Data](https://wwwn.cdc.gov/Nchs/Nhanes/Search/DataPage.aspx?Component=Questionnaire&Cycle=2013-2014).
 - DeMers, D., & Wachs, D. (2023). [Physiology, Mean Arterial Pressure](https://www.ncbi.nlm.nih.gov/books/NBK538226/).
+
+This report is completed as part of a final project for a Berkeley class called Statistics for Data Science. If you would like to learn more, please check out UC Berkeley master's programs. 
