@@ -1,7 +1,7 @@
 # Analyzing Effect of Weight on Blood Pressure 
 This repo contains code for the report: [Analyzing Effect of Weight on Blood Pressure](https://drive.google.com/file/d/1_HovWcbrhRbZbi9o4iB4M_nV3ofFlBCr/view). 
 
-All code in can be found under: report-and-code-ols-blood-pressure.Rmd
+All code in can be found under: report-and-code-ols-blood-pressure.Rmd \
 All data used in the project can be found under the src folder. 
 
 ## Overview
